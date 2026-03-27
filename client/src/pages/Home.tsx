@@ -103,14 +103,11 @@ export default function Home() {
             variants={itemVariants}
             className="relative rounded-2xl overflow-hidden shadow-2xl"
           >
-            <div className="aspect-video bg-gradient-to-br from-orange-400 via-pink-400 to-purple-400 flex items-center justify-center">
-              <div className="text-center text-white">
-                <Users className="w-20 h-20 mx-auto mb-4 opacity-80" />
-                <p className="text-xl font-semibold">
-                  Profissionais de Saúde de Excelência
-                </p>
-              </div>
-            </div>
+            <img
+              src="/hero-banner.png"
+              alt="Profissionais de Saúde Starbem"
+              className="w-full object-cover"
+            />
           </motion.div>
         </div>
       </motion.section>
