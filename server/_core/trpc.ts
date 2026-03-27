@@ -43,3 +43,23 @@ export const adminProcedure = t.procedure.use(
     });
   }),
 );
+
+const requireSupabaseAdmin = t.middleware(async opts => {
+  const { ctx, next } = opts;
+
+  if (!ctx.supabaseUser) {
+    throw new TRPCError({
+      code: "UNAUTHORIZED",
+      message: "Autenticacao Supabase necessaria",
+    });
+  }
+
+  return next({
+    ctx: {
+      ...ctx,
+      supabaseUser: ctx.supabaseUser,
+    },
+  });
+});
+
+export const supabaseAdminProcedure = t.procedure.use(requireSupabaseAdmin);

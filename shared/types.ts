@@ -16,7 +16,7 @@ export type ProfessionalProfile =
   | "psychologist"
   | "nutritionist";
 
-export type CandidateStatus = "ready" | "pending" | "rejected";
+export type CandidateStatus = "qualified" | "semi_qualified" | "not_qualified";
 
 export type CNPJStatus = "yes" | "no" | "pending";
 

@@ -1,26 +1,24 @@
 import { z } from "zod";
-import { publicProcedure, protectedProcedure, router } from "../_core/trpc";
+import { publicProcedure, supabaseAdminProcedure, router } from "../_core/trpc";
 import {
   createCandidate,
   getCandidateById,
   getCandidatesByProfileAndStatus,
+  getAllCandidates,
   updateCandidateStatus,
   createSubmissionLog,
 } from "../db";
 import { notifyOwner } from "../_core/notification";
-import type { InsertCandidate } from "../../drizzle/schema";
+import type { InsertCandidate } from "../db";
 
-/**
- * Schema de validação para submissão de candidato
- */
 const submitCandidateSchema = z.object({
   fullName: z.string().min(3, "Nome deve ter pelo menos 3 caracteres"),
-  email: z.string().email("Email inválido"),
-  phone: z.string().min(10, "Telefone inválido"),
+  email: z.string().email("Email invalido"),
+  phone: z.string().min(10, "Telefone invalido"),
   professionalProfile: z.enum(["clinical_doctor", "specialist_doctor", "psychologist", "nutritionist"]),
-  registrationNumber: z.string().min(4, "Número de registro inválido"),
+  registrationNumber: z.string().min(4, "Numero de registro invalido"),
   registrationState: z.string().length(2, "Estado deve ter 2 caracteres"),
-  yearsOfExperience: z.number().min(0, "Anos de experiência deve ser positivo"),
+  yearsOfExperience: z.number().min(0, "Anos de experiencia deve ser positivo"),
   hasCNPJ: z.enum(["yes", "no", "pending"]),
   cnpj: z.string().optional(),
   companyName: z.string().optional(),
@@ -31,41 +29,36 @@ const submitCandidateSchema = z.object({
   additionalInfo: z.record(z.string(), z.unknown()).optional(),
 });
 
-/**
- * Lógica de validação de candidato
- */
-function validateCandidate(data: z.infer<typeof submitCandidateSchema>): {
-  status: "ready" | "pending";
-  pendingReasons: string[];
+type SubmitInput = z.infer<typeof submitCandidateSchema>;
+
+function qualifyCandidate(data: SubmitInput): {
+  qualificationLevel: 1 | 2 | 3;
+  status: "qualified" | "semi_qualified" | "not_qualified";
+  reasons: string[];
 } {
-  const pendingReasons: string[] = [];
+  const hasCNPJ = data.hasCNPJ === "yes";
+  const daysCount = data.availableDays?.length ?? 0;
+  const shiftsCount = data.availableShifts?.length ?? 0;
+  const highAvailability = daysCount >= 4 || shiftsCount >= 2;
 
-  // Validar CNPJ
-  if (data.hasCNPJ === "no") {
-    pendingReasons.push("Candidato sem CNPJ formalizado");
-  } else if (data.hasCNPJ === "pending") {
-    pendingReasons.push("Aguardando confirmação de CNPJ");
+  if (hasCNPJ && highAvailability) {
+    return { qualificationLevel: 1, status: "qualified", reasons: [] };
   }
 
-  // Validar experiência mínima
-  const minExperience = data.professionalProfile === "specialist_doctor" ? 3 : 1;
-  if (data.yearsOfExperience < minExperience) {
-    pendingReasons.push(`Experiência mínima de ${minExperience} anos não atingida`);
+  if (hasCNPJ || highAvailability) {
+    const reasons: string[] = [];
+    if (!hasCNPJ) reasons.push("Sem CNPJ formalizado");
+    if (!highAvailability) reasons.push("Disponibilidade limitada");
+    return { qualificationLevel: 2, status: "semi_qualified", reasons };
   }
 
-  // Validar especialidades/certificações
-  if (!data.specialties || data.specialties.length === 0) {
-    pendingReasons.push("Especialidades não informadas");
-  }
-
-  const status = pendingReasons.length === 0 ? "ready" : "pending";
-
-  return { status, pendingReasons };
+  return {
+    qualificationLevel: 3,
+    status: "not_qualified",
+    reasons: ["Sem CNPJ formalizado", "Disponibilidade limitada"],
+  };
 }
 
-/**
- * Gerar caminho S3 baseado no perfil e status
- */
 function generateS3Path(profile: string, status: string): string {
   const profileMap: Record<string, string> = {
     clinical_doctor: "medicina-clinica",
@@ -73,87 +66,77 @@ function generateS3Path(profile: string, status: string): string {
     psychologist: "psicologia",
     nutritionist: "nutricao",
   };
-
   const folder = profileMap[profile] || "candidatos";
-  const subfolder = status === "ready" ? "prontos" : "pendencias";
-
+  const subfolder =
+    status === "qualified" ? "qualificados" :
+    status === "semi_qualified" ? "semi-qualificados" :
+    "nao-qualificados";
   return `banco-talentos/${folder}/${subfolder}`;
 }
 
 export const candidatesRouter = router({
-  /**
-   * Submeter novo candidato
-   */
   submit: publicProcedure
     .input(submitCandidateSchema)
     .mutation(async ({ input }) => {
-      try {
-        // Validar candidato
-        const { status, pendingReasons } = validateCandidate(input);
+      const { qualificationLevel, status, reasons } = qualifyCandidate(input);
 
-        // Preparar dados para inserção
-        const candidateData: InsertCandidate = {
-          fullName: input.fullName,
-          email: input.email,
-          phone: input.phone,
-          professionalProfile: input.professionalProfile as any,
-          registrationNumber: input.registrationNumber,
-          registrationState: input.registrationState,
-          yearsOfExperience: input.yearsOfExperience,
-          hasCNPJ: input.hasCNPJ as any,
-          cnpj: input.cnpj,
-          companyName: input.companyName,
-          specialties: input.specialties ? JSON.stringify(input.specialties) : null,
-          certifications: input.certifications ? JSON.stringify(input.certifications) : null,
-          additionalInfo: input.additionalInfo ? JSON.stringify(input.additionalInfo) : null,
-          status: status as any,
-          pendingReasons: pendingReasons.length > 0 ? JSON.stringify(pendingReasons) : null,
-          s3FolderPath: generateS3Path(input.professionalProfile, status),
-        };
+      const candidateData: InsertCandidate = {
+        fullName: input.fullName,
+        email: input.email,
+        phone: input.phone,
+        professionalProfile: input.professionalProfile as any,
+        registrationNumber: input.registrationNumber,
+        registrationState: input.registrationState,
+        yearsOfExperience: input.yearsOfExperience,
+        hasCNPJ: input.hasCNPJ as any,
+        cnpj: input.cnpj ?? null,
+        companyName: input.companyName ?? null,
+        specialties: input.specialties ? JSON.stringify(input.specialties) : null,
+        certifications: input.certifications ? JSON.stringify(input.certifications) : null,
+        additionalInfo: input.additionalInfo ? JSON.stringify(input.additionalInfo) : null,
+        availableDays: input.availableDays ? JSON.stringify(input.availableDays) : null,
+        availableShifts: input.availableShifts ? JSON.stringify(input.availableShifts) : null,
+        status: status as any,
+        qualificationLevel,
+        pendingReasons: reasons.length > 0 ? JSON.stringify(reasons) : null,
+        s3FolderPath: generateS3Path(input.professionalProfile, status),
+      };
 
-        // Criar candidato
-        const candidate = await createCandidate(candidateData);
-        if (!candidate) {
-          throw new Error("Falha ao criar candidato");
-        }
-
-        // Registrar log
-        await createSubmissionLog(candidate.id, "submitted", {
-          profile: input.professionalProfile,
-          status,
-        });
-
-        // Notificar owner
-        try {
-          await notifyOwner({
-            title: `Novo candidato: ${input.fullName}`,
-            content: `Perfil: ${input.professionalProfile}\nStatus: ${status}\nEmail: ${input.email}`,
-          });
-        } catch (error) {
-          console.error("Falha ao notificar owner:", error);
-        }
-
-        return {
-          success: true,
-          candidateId: candidate.id,
-          status,
-          needsCNPJ: input.hasCNPJ === "no",
-        };
-      } catch (error) {
-        console.error("Erro ao submeter candidato:", error);
-        throw error;
+      const candidate = await createCandidate(candidateData);
+      if (!candidate) {
+        throw new Error("Falha ao criar candidato");
       }
+
+      await createSubmissionLog(candidate.id, "submitted", {
+        profile: input.professionalProfile,
+        status,
+        qualificationLevel,
+      });
+
+      try {
+        await notifyOwner({
+          title: `Novo candidato: ${input.fullName}`,
+          content: `Perfil: ${input.professionalProfile}\nNivel: ${qualificationLevel}\nStatus: ${status}\nEmail: ${input.email}`,
+        });
+      } catch (error) {
+        console.error("Falha ao notificar owner:", error);
+      }
+
+      return {
+        success: true,
+        candidateId: candidate.id,
+        status,
+        qualificationLevel,
+        needsCNPJ: input.hasCNPJ === "no",
+      };
     }),
 
-  /**
-   * Obter candidato por ID
-   */
   getById: publicProcedure
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       const candidate = await getCandidateById(input.id);
       if (!candidate) {
-        throw new Error("Candidato não encontrado");
+        throw new Error("Candidato nao encontrado");
       }
 
       return {
@@ -161,26 +144,20 @@ export const candidatesRouter = router({
         specialties: candidate.specialties ? JSON.parse(candidate.specialties) : [],
         certifications: candidate.certifications ? JSON.parse(candidate.certifications) : [],
         additionalInfo: candidate.additionalInfo ? JSON.parse(candidate.additionalInfo) : {},
+        availableDays: candidate.availableDays ? JSON.parse(candidate.availableDays) : [],
+        availableShifts: candidate.availableShifts ? JSON.parse(candidate.availableShifts) : [],
         pendingReasons: candidate.pendingReasons ? JSON.parse(candidate.pendingReasons) : [],
       };
     }),
 
-  /**
-   * Listar candidatos por perfil e status (admin)
-   */
-  listByProfileAndStatus: protectedProcedure
+  listByProfileAndStatus: supabaseAdminProcedure
     .input(
       z.object({
         profile: z.string(),
         status: z.string(),
       })
     )
-    .query(async ({ ctx, input }) => {
-      // Verificar se é admin
-      if (ctx.user.role !== "admin") {
-        throw new Error("Acesso negado");
-      }
-
+    .query(async ({ input }) => {
       const candidates = await getCandidatesByProfileAndStatus(input.profile, input.status);
 
       return candidates.map((c) => ({
@@ -188,35 +165,52 @@ export const candidatesRouter = router({
         specialties: c.specialties ? JSON.parse(c.specialties) : [],
         certifications: c.certifications ? JSON.parse(c.certifications) : [],
         additionalInfo: c.additionalInfo ? JSON.parse(c.additionalInfo) : {},
+        availableDays: c.availableDays ? JSON.parse(c.availableDays) : [],
+        availableShifts: c.availableShifts ? JSON.parse(c.availableShifts) : [],
         pendingReasons: c.pendingReasons ? JSON.parse(c.pendingReasons) : [],
       }));
     }),
 
-  /**
-   * Atualizar status de candidato (admin)
-   */
-  updateStatus: protectedProcedure
+  exportAll: supabaseAdminProcedure
+    .query(async () => {
+      const candidates = await getAllCandidates();
+
+      return candidates.map((c) => ({
+        ...c,
+        specialties: c.specialties ? JSON.parse(c.specialties) : [],
+        certifications: c.certifications ? JSON.parse(c.certifications) : [],
+        additionalInfo: c.additionalInfo ? JSON.parse(c.additionalInfo) : {},
+        availableDays: c.availableDays ? JSON.parse(c.availableDays) : [],
+        availableShifts: c.availableShifts ? JSON.parse(c.availableShifts) : [],
+        pendingReasons: c.pendingReasons ? JSON.parse(c.pendingReasons) : [],
+      }));
+    }),
+
+  updateStatus: supabaseAdminProcedure
     .input(
       z.object({
         id: z.number(),
-        status: z.enum(["ready", "pending", "rejected"]),
+        status: z.enum(["qualified", "semi_qualified", "not_qualified"]),
         pendingReasons: z.array(z.string()).optional(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
-      // Verificar se é admin
-      if (ctx.user.role !== "admin") {
-        throw new Error("Acesso negado");
-      }
+    .mutation(async ({ input }) => {
+      const levelMap: Record<string, number> = {
+        qualified: 1,
+        semi_qualified: 2,
+        not_qualified: 3,
+      };
 
       await updateCandidateStatus(
         input.id,
         input.status,
+        levelMap[input.status],
         input.pendingReasons ? JSON.stringify(input.pendingReasons) : undefined
       );
 
       await createSubmissionLog(input.id, "status_changed", {
         newStatus: input.status,
+        qualificationLevel: levelMap[input.status],
         reasons: input.pendingReasons,
       });
 

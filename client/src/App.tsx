@@ -8,17 +8,17 @@ import Home from "./pages/Home";
 import TalentForm from "./pages/TalentForm";
 import Welcome from "./pages/Welcome";
 import AdminDashboard from "./pages/AdminDashboard";
+import AdminLogin from "./pages/AdminLogin";
 
 function Router() {
-  // make sure to consider if you need authentication for certain routes
   return (
     <Switch>
       <Route path={"/"} component={Home} />
       <Route path="/form" component={TalentForm} />
       <Route path="/welcome/:id" component={Welcome} />
+      <Route path="/admin/login" component={AdminLogin} />
       <Route path="/admin" component={AdminDashboard} />
       <Route path="/404" component={NotFound} />
-      {/* Final fallback route */}
       <Route component={NotFound} />
     </Switch>
   );

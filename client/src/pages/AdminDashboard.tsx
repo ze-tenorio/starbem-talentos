@@ -1,12 +1,11 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
 import { motion } from "framer-motion";
-import { Search, Filter, Download, Eye, CheckCircle, AlertCircle } from "lucide-react";
+import { Search, Download, FileSpreadsheet, CheckCircle, AlertCircle, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
-import { useAuth } from "@/_core/hooks/useAuth";
+import { useAdminAuth } from "@/hooks/useAdminAuth";
 import {
   PROFESSIONAL_PROFILES,
   type ProfessionalProfile,
@@ -20,22 +19,44 @@ const profiles: ProfessionalProfile[] = [
   "nutritionist",
 ];
 
-const statuses: CandidateStatus[] = ["ready", "pending", "rejected"];
+const statuses: CandidateStatus[] = ["qualified", "semi_qualified", "not_qualified"];
+
+const STATUS_LABELS: Record<CandidateStatus, string> = {
+  qualified: "Qualificado",
+  semi_qualified: "Semi-qualificado",
+  not_qualified: "Nao qualificado",
+};
+
+const STATUS_STYLES: Record<CandidateStatus, string> = {
+  qualified: "bg-green-100 text-green-800",
+  semi_qualified: "bg-yellow-100 text-yellow-800",
+  not_qualified: "bg-red-100 text-red-800",
+};
 
 export default function AdminDashboard() {
   const [, setLocation] = useLocation();
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, isAuthenticated, signOut } = useAdminAuth();
   const [selectedProfile, setSelectedProfile] = useState<ProfessionalProfile>("clinical_doctor");
-  const [selectedStatus, setSelectedStatus] = useState<CandidateStatus>("ready");
+  const [selectedStatus, setSelectedStatus] = useState<CandidateStatus>("qualified");
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Verificar autenticação e permissões
+  const { data: candidates = [], isLoading } = trpc.candidates.listByProfileAndStatus.useQuery(
+    { profile: selectedProfile, status: selectedStatus },
+    { enabled: isAuthenticated }
+  );
+
+  const updateStatusMutation = trpc.candidates.updateStatus.useMutation();
+
+  const exportAllQuery = trpc.candidates.exportAll.useQuery(undefined, {
+    enabled: false,
+  });
+
   if (authLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center">
           <div className="animate-spin mb-4">
-            <div className="w-12 h-12 border-4 border-orange-200 border-t-orange-500 rounded-full"></div>
+            <div className="w-12 h-12 border-4 border-orange-200 border-t-orange-500 rounded-full" />
           </div>
           <p className="text-gray-600">Carregando...</p>
         </div>
@@ -43,37 +64,11 @@ export default function AdminDashboard() {
     );
   }
 
-  if (!user || user.role !== "admin") {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <Card className="p-8 text-center max-w-md">
-          <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
-          <h1 className="text-2xl font-bold text-gray-900 mb-2">Acesso Negado</h1>
-          <p className="text-gray-600 mb-6">
-            Você não tem permissão para acessar esta página.
-          </p>
-          <Button onClick={() => setLocation("/")} className="w-full">
-            Voltar ao Início
-          </Button>
-        </Card>
-      </div>
-    );
+  if (!isAuthenticated) {
+    setLocation("/admin/login");
+    return null;
   }
 
-  // Buscar candidatos
-  const { data: candidates = [], isLoading } = trpc.candidates.listByProfileAndStatus.useQuery(
-    {
-      profile: selectedProfile,
-      status: selectedStatus,
-    },
-    {
-      enabled: !!user && user.role === "admin",
-    }
-  );
-
-  const updateStatusMutation = trpc.candidates.updateStatus.useMutation();
-
-  // Filtrar candidatos por termo de busca
   const filteredCandidates = candidates.filter(
     (candidate) =>
       candidate.fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -102,45 +97,118 @@ export default function AdminDashboard() {
       "Email",
       "Telefone",
       "Perfil",
-      "Experiência",
+      "CNPJ",
+      "Tem CNPJ",
+      "Registro",
+      "UF",
+      "Experiencia (anos)",
+      "Especialidades",
+      "Dias Disponiveis",
+      "Turnos Disponiveis",
+      "Nivel",
       "Status",
-      "Data de Submissão",
+      "Observacoes",
+      "Data de Submissao",
     ];
     const rows = filteredCandidates.map((c) => [
       c.fullName,
       c.email,
       c.phone,
       PROFESSIONAL_PROFILES[c.professionalProfile as ProfessionalProfile],
+      c.cnpj ?? "",
+      c.hasCNPJ,
+      c.registrationNumber,
+      c.registrationState,
       c.yearsOfExperience,
-      c.status,
+      Array.isArray(c.specialties) ? c.specialties.join("; ") : c.specialties ?? "",
+      Array.isArray(c.availableDays) ? c.availableDays.join("; ") : c.availableDays ?? "",
+      Array.isArray(c.availableShifts) ? c.availableShifts.join("; ") : c.availableShifts ?? "",
+      c.qualificationLevel,
+      STATUS_LABELS[c.status as CandidateStatus] ?? c.status,
+      Array.isArray(c.pendingReasons) ? c.pendingReasons.join("; ") : "",
       new Date(c.submittedAt).toLocaleDateString("pt-BR"),
     ]);
 
     const csv = [
       headers.join(","),
-      ...rows.map((row) => row.map((cell) => `"${cell}"`).join(",")),
+      ...rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")),
     ].join("\n");
 
-    const blob = new Blob([csv], { type: "text/csv" });
+    const BOM = "\uFEFF";
+    const blob = new Blob([BOM + csv], { type: "text/csv;charset=utf-8;" });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `candidatos-${selectedProfile}-${selectedStatus}.csv`;
     a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleExportAll = async () => {
+    const { data } = await exportAllQuery.refetch();
+    if (!data || data.length === 0) return;
+
+    const headers = [
+      "Nome", "Email", "Telefone", "Perfil", "CNPJ", "Tem CNPJ",
+      "Registro", "UF", "Experiencia (anos)", "Especialidades",
+      "Dias Disponiveis", "Turnos Disponiveis", "Nivel",
+      "Status", "Observacoes", "Data de Submissao",
+    ];
+    const rows = data.map((c: any) => [
+      c.fullName, c.email, c.phone,
+      PROFESSIONAL_PROFILES[c.professionalProfile as ProfessionalProfile],
+      c.cnpj ?? "", c.hasCNPJ, c.registrationNumber, c.registrationState,
+      c.yearsOfExperience,
+      Array.isArray(c.specialties) ? c.specialties.join("; ") : "",
+      Array.isArray(c.availableDays) ? c.availableDays.join("; ") : "",
+      Array.isArray(c.availableShifts) ? c.availableShifts.join("; ") : "",
+      c.qualificationLevel,
+      STATUS_LABELS[c.status as CandidateStatus] ?? c.status,
+      Array.isArray(c.pendingReasons) ? c.pendingReasons.join("; ") : "",
+      new Date(c.submittedAt).toLocaleDateString("pt-BR"),
+    ]);
+
+    const csv = [
+      headers.join(","),
+      ...rows.map((row: any[]) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")),
+    ].join("\n");
+
+    const BOM = "\uFEFF";
+    const blob = new Blob([BOM + csv], { type: "text/csv;charset=utf-8;" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `todos-candidatos-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const handleLogout = async () => {
+    await signOut();
+    setLocation("/admin/login");
   };
 
   return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* Header */}
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="text-3xl font-bold text-gray-900">Dashboard de Candidatos</h1>
-          <p className="text-gray-600 mt-2">
-            Gerencie e acompanhe os candidatos do banco de talentos
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">Dashboard de Candidatos</h1>
+              <p className="text-gray-600 mt-2">
+                Gerencie e acompanhe os candidatos do banco de talentos
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-gray-500">{user?.email}</span>
+              <Button variant="outline" size="sm" onClick={handleLogout} className="gap-2">
+                <LogOut className="w-4 h-4" />
+                Sair
+              </Button>
+            </div>
+          </div>
         </motion.div>
 
-        {/* Filters */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -167,7 +235,7 @@ export default function AdminDashboard() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Status
+                  Qualificacao
                 </label>
                 <select
                   value={selectedStatus}
@@ -176,11 +244,7 @@ export default function AdminDashboard() {
                 >
                   {statuses.map((status) => (
                     <option key={status} value={status}>
-                      {status === "ready"
-                        ? "Pronto para Contato"
-                        : status === "pending"
-                          ? "Com Pendências"
-                          : "Rejeitado"}
+                      {STATUS_LABELS[status]}
                     </option>
                   ))}
                 </select>
@@ -202,21 +266,29 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              <div className="flex items-end">
+              <div className="flex items-end gap-2">
                 <Button
                   onClick={handleDownloadCSV}
                   variant="outline"
-                  className="w-full gap-2"
+                  className="flex-1 gap-2"
                 >
                   <Download className="w-4 h-4" />
-                  Exportar CSV
+                  Exportar Filtro
+                </Button>
+                <Button
+                  onClick={handleExportAll}
+                  variant="outline"
+                  className="flex-1 gap-2"
+                  disabled={exportAllQuery.isFetching}
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  {exportAllQuery.isFetching ? "Exportando..." : "Exportar Tudo"}
                 </Button>
               </div>
             </div>
           </Card>
         </motion.div>
 
-        {/* Candidates List */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -225,7 +297,7 @@ export default function AdminDashboard() {
           {isLoading ? (
             <Card className="p-12 text-center border-0 shadow-lg">
               <div className="animate-spin mb-4">
-                <div className="w-12 h-12 border-4 border-orange-200 border-t-orange-500 rounded-full mx-auto"></div>
+                <div className="w-12 h-12 border-4 border-orange-200 border-t-orange-500 rounded-full mx-auto" />
               </div>
               <p className="text-gray-600">Carregando candidatos...</p>
             </Card>
@@ -249,24 +321,12 @@ export default function AdminDashboard() {
                           <h3 className="text-lg font-semibold text-gray-900">
                             {candidate.fullName}
                           </h3>
-                          <span
-                            className={`px-3 py-1 rounded-full text-xs font-medium ${
-                              candidate.status === "ready"
-                                ? "bg-green-100 text-green-800"
-                                : candidate.status === "pending"
-                                  ? "bg-yellow-100 text-yellow-800"
-                                  : "bg-red-100 text-red-800"
-                            }`}
-                          >
-                            {candidate.status === "ready"
-                              ? "✓ Pronto"
-                              : candidate.status === "pending"
-                                ? "⏳ Pendente"
-                                : "✗ Rejeitado"}
+                          <span className={`px-3 py-1 rounded-full text-xs font-medium ${STATUS_STYLES[candidate.status as CandidateStatus] ?? "bg-gray-100 text-gray-800"}`}>
+                            Nivel {candidate.qualificationLevel} - {STATUS_LABELS[candidate.status as CandidateStatus] ?? candidate.status}
                           </span>
                         </div>
 
-                        <div className="grid md:grid-cols-3 gap-4 text-sm text-gray-600">
+                        <div className="grid md:grid-cols-4 gap-4 text-sm text-gray-600">
                           <div>
                             <p className="font-medium text-gray-700">Email</p>
                             <p>{candidate.email}</p>
@@ -276,19 +336,23 @@ export default function AdminDashboard() {
                             <p>{candidate.phone}</p>
                           </div>
                           <div>
-                            <p className="font-medium text-gray-700">Experiência</p>
+                            <p className="font-medium text-gray-700">Experiencia</p>
                             <p>{candidate.yearsOfExperience} anos</p>
+                          </div>
+                          <div>
+                            <p className="font-medium text-gray-700">CNPJ</p>
+                            <p>{candidate.hasCNPJ === "yes" ? candidate.cnpj || "Sim" : candidate.hasCNPJ === "pending" ? "Em processo" : "Nao"}</p>
                           </div>
                         </div>
 
                         {candidate.pendingReasons && candidate.pendingReasons.length > 0 && (
                           <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
                             <p className="text-xs font-medium text-yellow-900 mb-1">
-                              Pendências:
+                              Observacoes:
                             </p>
                             <ul className="text-xs text-yellow-800 space-y-1">
                               {candidate.pendingReasons.map((reason: string, idx: number) => (
-                                <li key={idx}>• {reason}</li>
+                                <li key={idx}>- {reason}</li>
                               ))}
                             </ul>
                           </div>
@@ -296,27 +360,15 @@ export default function AdminDashboard() {
                       </div>
 
                       <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            // Implementar visualização detalhada
-                          }}
-                          className="gap-2"
-                        >
-                          <Eye className="w-4 h-4" />
-                          Ver
-                        </Button>
-
-                        {candidate.status !== "ready" && (
+                        {candidate.status !== "qualified" && (
                           <Button
                             size="sm"
-                            onClick={() => handleStatusChange(candidate.id, "ready")}
+                            onClick={() => handleStatusChange(candidate.id, "qualified")}
                             disabled={updateStatusMutation.isPending}
                             className="gap-2 bg-green-600 hover:bg-green-700"
                           >
                             <CheckCircle className="w-4 h-4" />
-                            Aprovar
+                            Qualificar
                           </Button>
                         )}
                       </div>
@@ -328,7 +380,6 @@ export default function AdminDashboard() {
           )}
         </motion.div>
 
-        {/* Summary */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -336,27 +387,27 @@ export default function AdminDashboard() {
           className="grid md:grid-cols-3 gap-4"
         >
           <Card className="p-6 border-0 shadow-lg bg-gradient-to-br from-green-50 to-green-100">
-            <p className="text-sm text-green-700 font-medium mb-2">Prontos para Contato</p>
+            <p className="text-sm text-green-700 font-medium mb-2">Nivel 1 - Qualificados</p>
             <p className="text-3xl font-bold text-green-900">
-              {candidates.filter((c) => c.status === "ready").length}
+              {candidates.filter((c) => c.status === "qualified").length}
             </p>
           </Card>
 
           <Card className="p-6 border-0 shadow-lg bg-gradient-to-br from-yellow-50 to-yellow-100">
-            <p className="text-sm text-yellow-700 font-medium mb-2">Com Pendências</p>
+            <p className="text-sm text-yellow-700 font-medium mb-2">Nivel 2 - Semi-qualificados</p>
             <p className="text-3xl font-bold text-yellow-900">
-              {candidates.filter((c) => c.status === "pending").length}
+              {candidates.filter((c) => c.status === "semi_qualified").length}
             </p>
           </Card>
 
           <Card className="p-6 border-0 shadow-lg bg-gradient-to-br from-red-50 to-red-100">
-            <p className="text-sm text-red-700 font-medium mb-2">Rejeitados</p>
+            <p className="text-sm text-red-700 font-medium mb-2">Nivel 3 - Nao qualificados</p>
             <p className="text-3xl font-bold text-red-900">
-              {candidates.filter((c) => c.status === "rejected").length}
+              {candidates.filter((c) => c.status === "not_qualified").length}
             </p>
           </Card>
         </motion.div>
       </div>
-    </DashboardLayout>
+    </div>
   );
 }
